@@ -14,3 +14,9 @@ The resulting annotations can later be exposed through RDF mappings and queried 
 ### GPS_annotations.py
 
 Extracts GPS metadata directly from the original image files already stored in OMERO.
+
+
+### GPS_extract.py
+
+Extract GPS metadata from original image files and generate a CSV ready for the standard **Import from CSV** OMERO script.
+
