@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
+"""
+OMERO.web script for creating geolocation MapAnnotations from EXIF GPS metadata.
 
+The script processes selected images, or all images in a selected dataset,
+reads GPS metadata from the original uploaded image files using ExifTool,
+and stores latitude, longitude, altitude as MapAnnotations.
+"""
 import os
 import shutil
 import subprocess
@@ -26,7 +32,9 @@ def find_original_files(conn, image_id):
     """
     Find the original file associated with an OMERO Image.
 
-    GPS metadata is stored in the original image file so we need to locate the OriginalFile.
+    GPS metadata is stored in the original uploaded image file, so the
+    script must locate the OMERO OriginalFile linked to the Image through its
+    Fileset.
     """
     query = """
         select f.id, f.name
@@ -47,8 +55,9 @@ def download_original_file(conn, original_file_id, filename):
     """
     Download the OMERO OriginalFile to a temporary local file.
 
-    ExifTool works on local files, so each image is downloaded temporarily
-    and deleted immediately after GPS extraction.
+    ExifTool works on local files, not directly on OMERO objects. The script
+    downloads one image at a time, extracts the metadata, and deletes
+    the temporary file afterwards.
     """
     suffix = os.path.splitext(filename)[1]
 
@@ -97,10 +106,10 @@ def exiftool_value(path, tag, numeric=False):
 
 def extract_gps(path):
     """
-    Extract the basic GPS values used by the new Omero annotation.
+    Extract the GPS values used by the geolocation MapAnnotation.
 
-    Latitude and longitude are required. Altitude is optional and set to
-    NA if it is not available in the EXIF metadata.
+    Latitude and longitude are required. Altitude is optional and stored as
+    NA when it is not present in the EXIF metadata.
     """
     lat = exiftool_value(path, "GPSLatitude", numeric=True)
     lon = exiftool_value(path, "GPSLongitude", numeric=True)
@@ -116,7 +125,7 @@ def extract_gps(path):
 
 
 def osm_url(lat, lon):
-    """Create an OpenStreetMap link from latitude and longitude."""
+    """Create a direct OpenStreetMap link from latitude and longitude."""
     return (
         "https://www.openstreetmap.org/"
         f"?mlat={lat}&mlon={lon}#map=16/{lat}/{lon}"
@@ -125,7 +134,7 @@ def osm_url(lat, lon):
 
 def has_geolocation_annotation(image, namespace):
     """
-    Check if the image already has a MapAnnotation in this namespace.
+    Check whether the image already has a MapAnnotation in this namespace.
     
     """
     for ann in image.listAnnotations():
@@ -140,11 +149,11 @@ def has_geolocation_annotation(image, namespace):
 
 def add_geolocation_annotation(conn, image, gps, source_file, namespace):
     """
-    Create and link one MapAnnotation containing the GPS values.
+    Create and link one geolocation MapAnnotation to an Image.
 
-    The annotation uses a configurable namespace. By default this our
-    OMERO geolocation namespace, but the user may choose GeoSPARQL or a
-    custom namespace from the script form.
+    The annotation namespace is configurable. The default is the OMERO
+    geolocation namespace, but users can also choose the GeoSPARQL namespace
+    or provide a custom namespace.
     """
     lat = gps["latitude"]
     lon = gps["longitude"]
@@ -182,6 +191,7 @@ def process_image(conn, image, namespace):
 
     selected = None
 
+    # Select the first supported original image file linked to this OMERO Image.
     for file_id, file_name in find_original_files(conn, image_id):
         suffix = os.path.splitext(file_name)[1].lower()
 
@@ -213,8 +223,8 @@ def get_images_to_process(conn, data_type, ids):
     """
     Accept either Dataset IDs or Image IDs from the OMERO.web form.
 
-    Dataset option processes all images in the selected Dataset.
-    Image option processes only the selected Image IDs.
+    Dataset mode processes all Images inside the selected Dataset.
+    Image mode processes only the selected Image IDs.
     """
     images = []
 
@@ -234,7 +244,7 @@ def get_images_to_process(conn, data_type, ids):
 
 
 def get_namespace(client):
-    """Resolve the selected namespace, including custom user input."""
+    """Resolve the selected namespace, including optional custom user input."""
     namespace = client.getInput(P_NAMESPACE, unwrap=True)
     custom_namespace = client.getInput(P_CUSTOM_NAMESPACE, unwrap=True)
 
@@ -306,6 +316,7 @@ def run_script():
 
         conn = BlitzGateway(client_obj=client)
 
+        # ExifTool must be installed in the OMERO.server environment.
         if shutil.which("exiftool") is None:
             client.setOutput("ERROR", rstring("exiftool is not available."))
             return
@@ -318,6 +329,7 @@ def run_script():
         without_original = 0
         result_obj = None
 
+        # Process each image and count the outcome for the Activity summary.
         for image in images:
             status, detail = process_image(conn, image, namespace)
 
