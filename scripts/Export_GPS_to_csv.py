@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""
+OMERO.web script for exporting EXIF GPS metadata to a CSV file.
+
+The script processes selected Images, or all Images in a selected Dataset,
+reads GPS metadata from the original uploaded image files using ExifTool,
+and attaches a CSV file that can be reviewed or imported with "Import from csv" script.
+"""
 
 import csv
 import os
@@ -23,10 +30,11 @@ DEFAULT_IMPORT_NS = "openmicroscopy.org/omero/client/mapAnnotation/geolocation"
 
 def find_original_files(conn, image_id):
     """
-    Find the original imported file associated with an OMERO Image.
+    Find the original file associated with an OMERO Image.
 
-    GPS metadata is stored in the original image file, so the script needs
-    the OriginalFile rather than the rendered image shown in OMERO.web.
+    GPS metadata is stored in the original uploaded image file. Therefore the
+    script must locate the OMERO OriginalFile linked to the Image through its
+    Fileset.
     """
     query = """
         select f.id, f.name
@@ -46,7 +54,10 @@ def find_original_files(conn, image_id):
 def download_original_file(conn, original_file_id, filename):
     """
     Download the OMERO OriginalFile to a temporary local file.
-    
+
+    ExifTool works on local files, not directly on OMERO objects. The script
+    therefore downloads one image at a time, extracts the metadata, writes the
+    CSV row, and deletes the temporary file immediately afterwards.
     """
     suffix = os.path.splitext(filename)[1]
 
@@ -95,10 +106,10 @@ def exiftool_value(path, tag, numeric=False):
 
 def extract_gps(path):
     """
-    Extract the core GPS values used by the geolocation annotation.
+    Extract the GPS values exported to the CSV file.
 
-    Latitude and longitude are required. Altitude is optional and stored
-    as NA if it is not present.
+    Latitude and longitude are required. Altitude is optional and stored as
+    NA when it is not present in the EXIF metadata.
     """
     lat = exiftool_value(path, "GPSLatitude", numeric=True)
     lon = exiftool_value(path, "GPSLongitude", numeric=True)
@@ -114,7 +125,7 @@ def extract_gps(path):
 
 
 def osm_url(lat, lon):
-    """Create an OpenStreetMap link from latitude and longitude."""
+    """Create a direct OpenStreetMap link from latitude and longitude."""
     return (
         "https://www.openstreetmap.org/"
         f"?mlat={lat}&mlon={lon}#map=16/{lat}/{lon}"
@@ -125,6 +136,9 @@ def get_images_to_process(conn, data_type, ids):
     """
     Accept either Dataset IDs or Image IDs from the OMERO.web form.
 
+    Dataset mode exports GPS metadata for all Images inside the selected
+    Dataset. 
+    Image mode exports GPS metadata only for the selected Image IDs.
     """
     images = []
     source_objects = []
@@ -147,7 +161,13 @@ def get_images_to_process(conn, data_type, ids):
 
 
 def create_csv_for_images(conn, images, label):
-    """Create a temporary CSV containing GPS metadata for selected Images."""
+    """
+    Create a temporary CSV containing GPS metadata for selected Images.
+
+    The CSV follows the same object identification convention as OMERO's
+    Import from CSV script: OBJECT_ID and OBJECT_NAME identify the target
+    Image, and the remaining columns become key-value annotations.
+    """
     fd, csv_path = tempfile.mkstemp(
         prefix=f"gps_metadata_{label}_",
         suffix=".csv"
@@ -178,6 +198,7 @@ def create_csv_for_images(conn, images, label):
 
             selected = None
 
+            # Select the first supported original image file linked to this Image.
             for file_id, file_name in find_original_files(conn, image_id):
                 suffix = os.path.splitext(file_name)[1].lower()
 
@@ -213,6 +234,7 @@ def create_csv_for_images(conn, images, label):
                 lat = gps["latitude"]
                 lon = gps["longitude"]
 
+                # This row can later be imported using OMERO's Import from CSV.
                 writer.writerow([
                     image_id,
                     image_name,
@@ -235,7 +257,7 @@ def create_csv_for_images(conn, images, label):
 
 def run_script():
     client = scripts.client(
-        "GPS extract",
+        "Export GPS to CSV",
         (
             "Extract GPS EXIF metadata from original files and create a CSV "
             "for review or import as geolocation MapAnnotations."
@@ -260,7 +282,7 @@ def run_script():
         authors=["Daniel Olvera"],
         institutions=["MPI-EvolBio"],
         contact="https://forum.image.sc/tag/omero",
-        version="0.8.0",
+        version="0.9.0",
     )
 
     try:
@@ -269,6 +291,7 @@ def run_script():
 
         conn = BlitzGateway(client_obj=client)
 
+        # ExifTool must be installed in the OMERO.server environment.
         if shutil.which("exiftool") is None:
             client.setOutput("ERROR", rstring("exiftool is not available."))
             return
@@ -287,6 +310,7 @@ def run_script():
             label,
         )
 
+        # Attach the generated CSV to the selected Dataset/Image for download.
         target = source_objects[0] if source_objects else images[0]
 
         file_ann = conn.createFileAnnfromLocalFile(

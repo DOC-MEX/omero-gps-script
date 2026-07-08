@@ -130,3 +130,36 @@ The `osm_url` entry provides a direct link to the position in OpenStreetMap.
 <p align="center">
   <img src="docs/images/openstreet_link.png" width="400">
 </p>
+
+
+## Export_GPS_to_csv.py
+
+`Export_GPS_to_csv.py` extracts GPS metadata from image EXIF metadata and creates a downloadable CSV file.
+
+Users can review, edit, or validate GPS metadata before using the csv to add annotations. The generated csv can be imported using the standard **Import from csv** script.
+
+For each selected Image, the script:
+
+1. Finds the OMERO `OriginalFile` associated with the Image.
+2. Downloads the original file temporarily.
+3. Reads GPS EXIF metadata using ExifTool.
+4. Writes the GPS metadata into a CSV row.
+5. Attaches the CSV to the selected Dataset or Image as a FileAnnotation.
+6. Deletes the temporary image file and temporary CSV file from the server.
+
+### CSV columns
+
+The script creates a CSV with the following columns:
+
+| Column | Description |
+|--------|-------------|
+| `OBJECT_ID` | OMERO Image ID |
+| `OBJECT_NAME` | OMERO Image name |
+| `latitude` | Latitude in decimal degrees |
+| `longitude` | Longitude in decimal degrees |
+| `altitude` | Altitude from EXIF GPS metadata, or `NA` if unavailable |
+| `osm_url` | OpenStreetMap link for the coordinates |
+| `source` | Set to `EXIF GPS` |
+| `source_file` | Original image filename |
+
+Images without GPS metadata are still included in the CSV, but the GPS fields are left empty.
