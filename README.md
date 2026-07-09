@@ -163,3 +163,48 @@ The script creates a CSV with the following columns:
 | `source_file` | Original image filename |
 
 Images without GPS metadata are still included in the CSV, but the GPS fields are left empty.
+
+## Add_GPS_annotations_with_file.py
+
+`Add_GPS_annotations_with_file.py` adds geolocation MapAnnotations to OMERO Images using an external GPS logging file.
+
+This script is useful when images do not contain GPS coordinates directly in their EXIF metadata, but a separate GPS logger recorded positions during image acquisition.
+
+The script matches each image timestamp against the nearest GPS fix in the attached logging file and creates MapAnnotations using the same geolocation schema as `Add_GPS_annotations.py`.
+
+### Supported GPS logging files
+
+Currently supported:
+
+- OM System `.LOG`
+
+Future versions may add support for GPX and other common formats.
+
+For each selected Image, the script:
+
+1. Finds the OMERO `OriginalFile` associated with the Image.
+2. Downloads the original image temporarily.
+3. Reads the image EXIF `DateTimeOriginal` value using ExifTool.
+4. Loads GPS fixes from the attached GPS logging file.
+5. Converts GPS UTC timestamps to local camera time using the LOG file header offset.
+6. Finds the nearest GPS fix within 45 seconds.
+7. Creates a geolocation MapAnnotation.
+8. Deletes all temporary files.
+
+The script can process either all images in a Dataset or selected individual images
+
+The script creates the following key-value pairs:
+
+| Key | Description |
+|-----|-------------|
+| `latitude` | Latitude in decimal degrees |
+| `longitude` | Longitude in decimal degrees |
+| `altitude` | Altitude from the GPS logging file, or `NA` if unavailable |
+| `osm_url` | OpenStreetMap link for the coordinates |
+| `source` | Set to `GPS LOG` |
+| `source_file` | Original image filename |
+| `gps_log_file` | GPS logging filename |
+| `image_datetime_original` | EXIF image timestamp |
+| `matched_gps_local_time` | Matched GPS timestamp converted to local time |
+| `matched_gps_utc_time` | Original matched GPS UTC timestamp |
+| `time_difference_seconds` | Time difference between the image timestamp and matched GPS fix |

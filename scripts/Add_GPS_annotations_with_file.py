@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+"""
+Add geolocation MapAnnotations to OMERO Images using a GPS logging file.
+
+The script matches the timestamp (DateTimeOriginal) stored in each image EXIF
+metadata with the nearest GPS position recorded in an attached GPS LOG file.
+The resulting latitude, longitude and matching provenance are stored as
+standard OMERO MapAnnotations.
+"""
 
 import os
 import re
@@ -21,8 +29,12 @@ P_NAMESPACE = "Namespace"
 P_CUSTOM_NAMESPACE = "Custom namespace"
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".tif", ".tiff", ".png"}
+# The parser has been tested with OM Systems  .LOG files.
+# .NMEA and .TXT are accepted because they may contain the same NMEA records,
+# but more GPS logger formats still need systematic testing.
 LOG_EXTENSIONS = {".log", ".nmea", ".txt"}
 
+# Fixed threshold used when matching image timestamps to GPS fixes.
 MAX_TIME_DIFFERENCE_SECONDS = 45
 
 OMERO_GEO_NS = "openmicroscopy.org/omero/client/mapAnnotation/geolocation"
@@ -31,10 +43,9 @@ GEOSPARQL_NS = "http://www.opengis.net/ont/geosparql#"
 
 def find_original_files(conn, image_id):
     """
-    Find the original imported file associated with an OMERO Image.
+    Find the original file associated with an OMERO Image.
 
-    DateTimeOriginal is read from the original image file because that is where
-    the camera EXIF metadata is stored.
+    DateTimeOriginal is stored in the original uploaded image file. 
     """
     query = """
         select f.id, f.name
@@ -55,8 +66,6 @@ def download_original_file(conn, original_file_id, filename):
     """
     Download an OMERO OriginalFile to a temporary local file.
 
-    ExifTool works on local files, so both image files and GPS LOG files are
-    downloaded briefly, processed, and removed afterwards.
     """
     suffix = os.path.splitext(filename)[1]
     fd, path = tempfile.mkstemp(prefix="omero_original_", suffix=suffix)
@@ -88,8 +97,7 @@ def get_latest_log_file_annotation(source_object):
     """
     Find the newest LOG-like FileAnnotation attached to the selected object.
 
-    This mirrors the Import_from_csv style: if no file is explicitly selected,
-    the script uses the most recent suitable file attached to the Dataset/Image.
+    This follows the same the Import from CSV script.
     """
     selected = None
 
@@ -117,11 +125,11 @@ def get_latest_log_file_annotation(source_object):
 
 def get_log_file_annotation(conn, source_objects, file_ann_input):
     """
-    Resolve the GPS LOG FileAnnotation.
+    Resolve the GPS LOG FileAnnotation used by the script.
 
-    If the user selected a FileAnnotation in the script form, use it.
-    Otherwise, use the newest .LOG/.NMEA/.TXT attachment on the first source
-    object.
+    If the user selected a FileAnnotation in the script form, that file is used.
+    If the field is left blank, the newest suitable LOG-like attachment on the
+    first selected Dataset/Image is used.
     """
     if file_ann_input:
         file_ann_id = int(str(file_ann_input).split(",")[0])
@@ -144,7 +152,12 @@ def get_log_file_annotation(conn, source_objects, file_ann_input):
 
 
 def download_file_annotation(conn, file_ann):
-    """Download a FileAnnotation's OriginalFile and return path and filename."""
+    """
+    Download the selected GPS LOG FileAnnotation.
+
+    The file is written temporarily to disk so it can be parsed by the script.
+    The temporary file is removed after the GPS fixes have been loaded.
+    """
     original_file = file_ann.getFile()
     filename = original_file.getName()
 
@@ -171,8 +184,9 @@ def get_image_datetime(path):
     """
     Read DateTimeOriginal from image EXIF metadata.
 
-    This is normally local camera time. GPS LOG timestamps are converted to
-    local time using the offset in the LOG header before matching.
+    DateTimeOriginal is normally stored as local camera time and usually has no
+    timezone. The GPS LOG timestamps are converted to this local time before
+    matching.
     """
     value = exiftool_value(path, "DateTimeOriginal")
 
@@ -201,6 +215,9 @@ def parse_offset_from_header(line):
 
     Example:
     @OM Digital Solutions/+0100/+0100
+
+    The offset is applied to GPS UTC timestamps so they can be compared with
+    the image DateTimeOriginal values recorded by the camera.
     """
     match = re.search(r"/([+-])(\d{2})(\d{2})", line)
 
@@ -231,10 +248,15 @@ def parse_nmea_date(value):
 
 def load_gps_log(log_path):
     """
-    Read GPS fixes from an OM Digital / NMEA LOG file.
+    Read GPS logs from an OM Digital / NMEA LOG file.
 
-    $GPRMC provides date, time, latitude and longitude.
-    $GPGGA provides altitude when available.
+    The LOG file contains two complementary NMEA record types:
+    - $GPRMC provides date, time, latitude and longitude.
+    - $GPGGA provides altitude when available.
+
+    GPS timestamps are stored in UTC. The timezone offset recorded in the LOG
+    header is applied so the timestamps can be compared directly with the local
+    DateTimeOriginal values stored in image EXIF metadata.
     """
     offset = timedelta(0)
     altitude_by_time = {}
@@ -298,9 +320,11 @@ def load_gps_log(log_path):
 
 def find_nearest_gps(image_dt, fixes):
     """
-    Find the GPS fix closest to the image timestamp.
+    Find the GPS fix closest in time to the image timestamp.
 
-    The maximum accepted difference is fixed at 45 seconds.
+    Only fixes within MAX_TIME_DIFFERENCE_SECONDS are accepted. This prevents
+    assigning uncertain coordinates to images when GPS logging contains long
+    gaps (the camera clock and GPS logger are not sufficiently synchronized).
     """
     if image_dt is None:
         return None, None
@@ -322,7 +346,7 @@ def find_nearest_gps(image_dt, fixes):
 
 
 def osm_url(lat, lon):
-    """Create an OpenStreetMap link from latitude and longitude."""
+    """Create a direct OpenStreetMap link from latitude and longitude."""
     return (
         "https://www.openstreetmap.org/"
         f"?mlat={lat}&mlon={lon}#map=16/{lat}/{lon}"
@@ -330,7 +354,11 @@ def osm_url(lat, lon):
 
 
 def has_geolocation_annotation(image, namespace):
-    """Avoid duplicate geolocation annotations in the selected namespace."""
+    """
+    Check whether the image already has a MapAnnotation in this namespace.
+
+    This prevents duplicate geolocation annotations.
+    """
     for ann in image.listAnnotations():
         if "MapAnnotation" not in type(ann).__name__:
             continue
@@ -346,8 +374,9 @@ def add_annotation(conn, image, image_dt, gps, log_filename,
     """
     Create and link one geolocation MapAnnotation.
 
-    Extra time-matching fields are included so users can audit which GPS fix
-    was matched to each image.
+    Besides latitude, longitude and altitude, additional matching fields are
+    stored. These allow users to audit which GPS fix was selected and how
+    closely it matched the image timestamp.
     """
     lat = gps["latitude"]
     lon = gps["longitude"]
@@ -377,7 +406,12 @@ def add_annotation(conn, image, image_dt, gps, log_filename,
 
 
 def get_images_to_process(conn, data_type, ids):
-    """Accept either Dataset IDs or Image IDs from the OMERO.web form."""
+    """
+    Accept either Dataset IDs or Image IDs from the OMERO.web form.
+
+    Dataset mode processes all Images inside the selected Dataset.
+    Image mode processes only the selected Image IDs.
+    """
     images = []
     source_objects = []
 
@@ -399,7 +433,12 @@ def get_images_to_process(conn, data_type, ids):
 
 
 def get_namespace(client):
-    """Resolve the selected namespace, including custom user input."""
+    """
+    Resolve the namespace selected by the user.
+
+    The script supports the default OMERO geolocation namespace, the
+    GeoSPARQL namespace, or a completely custom namespace.
+    """
     namespace = client.getInput(P_NAMESPACE, unwrap=True)
     custom_namespace = client.getInput(P_CUSTOM_NAMESPACE, unwrap=True)
 
@@ -414,12 +453,19 @@ def get_namespace(client):
 
 
 def process_image(conn, image, fixes, log_filename, namespace):
-    """Match one image to the nearest GPS LOG fix and add an annotation."""
+    """
+    Process one Image using the GPS logging file.
+
+    The image timestamp is read from EXIF DateTimeOriginal and compared with all
+    GPS fixes from the LOG file. If a sufficiently close match is found, a
+    geolocation MapAnnotation is created.
+    """
     if has_geolocation_annotation(image, namespace):
         return "already_annotated", None
 
     selected = None
 
+    # Select the first supported original image file linked to this Image.
     for file_id, file_name in find_original_files(conn, image.getId()):
         suffix = os.path.splitext(file_name)[1].lower()
 
@@ -464,10 +510,11 @@ def process_image(conn, image, fixes, log_filename, namespace):
 
 def run_script():
     client = scripts.client(
-        "GPS LOG annotations",
+        "Add GPS annotations with file",
         (
-            "Match image timestamps against an OM Digital / NMEA GPS LOG file "
-            "and add geolocation MapAnnotations."
+            "Match image timestamps against an attached GPS logging file "
+            "and create geolocation MapAnnotations for the selected "
+            "Images or Dataset."
         ),
 
         scripts.String(
@@ -520,7 +567,7 @@ def run_script():
         authors=["Daniel Olvera"],
         institutions=["MPI-EvolBio"],
         contact="https://forum.image.sc/tag/omero",
-        version="0.2.0",
+        version="0.3.0",
     )
 
     try:
@@ -531,6 +578,7 @@ def run_script():
 
         conn = BlitzGateway(client_obj=client)
 
+        # ExifTool must be installed in the OMERO.server environment.
         if shutil.which("exiftool") is None:
             client.setOutput("ERROR", rstring("exiftool is not available."))
             return
@@ -561,6 +609,7 @@ def run_script():
         no_original = 0
         result_obj = None
 
+        # Process each image and count the outcome for the Activity summary.
         for image in images:
             status, detail = process_image(conn, image, fixes, log_filename, namespace)
 
